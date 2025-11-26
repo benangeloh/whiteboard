@@ -13,23 +13,15 @@ export type CanvasElement = {
   y: number;
   width?: number; 
   height?: number;
-  points?: Point[] | null; // Allow null
+  points?: Point[] | null;
   color: string;
   fill_color?: string;
   stroke_width: number;
+  rotation?: number;
   is_deleted?: boolean;
-  text?: string; // New field
+  text?: string;
 };
 
-export type UserCursor = {
-  x: number; 
-  y: number; 
-  userId: string; 
-  color: string;
-};
-
-export type Camera = {
-  x: number; 
-  y: number; 
-  z: number; 
-};
+export type UserCursor = { x: number; y: number; userId: string; color: string; };
+export type Camera = { x: number; y: number; z: number; };
+export type BoundingBox = { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number };

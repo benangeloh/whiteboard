@@ -16,7 +16,6 @@ interface SideToolbarProps {
 const COLORS = ["#000000", "#ef4444", "#22c55e", "#3b82f6", "#a855f7", "transparent"];
 
 export default function SideToolbar({ tool, color, setColor, width, setWidth, onUndo, onSave }: SideToolbarProps) {
-  // Hide if tool is hand, selection, or eraser (simple implementation)
   const isHidden = ['hand', 'selection', 'eraser', 'image'].includes(tool);
 
   if (isHidden) return (
@@ -29,7 +28,6 @@ export default function SideToolbar({ tool, color, setColor, width, setWidth, on
   return (
     <div className="fixed left-4 top-1/2 -translate-y-1/2 flex flex-col gap-4 bg-white p-3 rounded-xl shadow-xl border border-slate-200 z-50 animate-in slide-in-from-left-4 fade-in">
       
-      {/* Stroke Color */}
       <div className="flex flex-col gap-2">
         <label className="text-xs font-bold text-slate-400 uppercase">Stroke</label>
         <div className="grid grid-cols-2 gap-2">
@@ -55,7 +53,6 @@ export default function SideToolbar({ tool, color, setColor, width, setWidth, on
 
       <div className="h-[1px] bg-slate-200 w-full" />
 
-      {/* Stroke Width */}
       <div className="flex flex-col gap-2">
         <label className="text-xs font-bold text-slate-400 uppercase">Width: {width}px</label>
         <input
