@@ -40,7 +40,6 @@ export function getElementBounds(el: CanvasElement): BoundingBox | null {
   } 
   
   if (el.width !== undefined && el.height !== undefined) {
-    // Normalize negative dimensions for calculation
     const x = el.width < 0 ? el.x + el.width : el.x;
     const y = el.height < 0 ? el.y + el.height : el.y;
     const w = Math.abs(el.width);
@@ -53,16 +52,13 @@ export function getElementBounds(el: CanvasElement): BoundingBox | null {
 export function isHit(point: Point, el: CanvasElement): boolean {
   if (el.is_deleted) return false;
   
-  // 1. Get Unrotated Bounds
   const bounds = getElementBounds(el);
   if (!bounds) return false;
 
-  // 2. Rotate Mouse Point into Local Space (Inverse Rotation)
   const cx = bounds.minX + bounds.width / 2;
   const cy = bounds.minY + bounds.height / 2;
   const localPoint = rotatePoint(point, { x: cx, y: cy }, -(el.rotation || 0));
 
-  // 3. Check Bounding Box Hit (Generous padding for selection)
   const padding = 5;
   const inBox = 
     localPoint.x >= bounds.minX - padding && 
@@ -70,9 +66,7 @@ export function isHit(point: Point, el: CanvasElement): boolean {
     localPoint.y >= bounds.minY - padding && 
     localPoint.y <= bounds.maxY + padding;
 
-  // For selection tool, hitting the box is enough
   if (inBox) return true;
-
   return false;
 }
 
@@ -82,7 +76,6 @@ export function getResizeHandle(point: Point, bounds: BoundingBox, zoom: number,
   const cx = minX + width / 2;
   const cy = minY + height / 2;
 
-  // Rotate mouse to match local handle positions
   const localPoint = rotatePoint(point, { x: cx, y: cy }, -rotation);
 
   const handles = {
@@ -117,7 +110,6 @@ export function getCursorForHandle(handle: string, rotation: number): string {
   const baseAngle = cursorMap[handle];
   if (baseAngle === undefined) return 'default';
 
-  // Add rotation to the cursor angle
   const totalAngle = (baseAngle + rotation + 360) % 360;
   
   if (totalAngle > 337.5 || totalAngle <= 22.5) return 'ns-resize';
@@ -128,4 +120,47 @@ export function getCursorForHandle(handle: string, rotation: number): string {
   if (totalAngle > 202.5 && totalAngle <= 247.5) return 'nesw-resize';
   if (totalAngle > 247.5 && totalAngle <= 292.5) return 'ew-resize';
   return 'nwse-resize';
+}
+
+export function getWrappedText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  return text.split('\n').flatMap(paragraph => {
+      const words = paragraph.split(' ');
+      const lines: string[] = [];
+      let currentLine = words[0] || '';
+
+      for (let i = 1; i < words.length; i++) {
+          const word = words[i];
+          const testLine = currentLine + " " + word;
+          const width = ctx.measureText(testLine).width;
+
+          if (width < maxWidth) {
+              currentLine = testLine;
+          } else {
+              lines.push(currentLine);
+              currentLine = word;
+          }
+      }
+      lines.push(currentLine);
+      
+      const finalLines: string[] = [];
+      lines.forEach(line => {
+          if (ctx.measureText(line).width <= maxWidth) {
+              finalLines.push(line);
+          } else {
+              let chars = line.split('');
+              let tempLine = chars[0];
+              for(let k=1; k<chars.length; k++) {
+                  if (ctx.measureText(tempLine + chars[k]).width < maxWidth) {
+                      tempLine += chars[k];
+                  } else {
+                      finalLines.push(tempLine);
+                      tempLine = chars[k];
+                  }
+              }
+              finalLines.push(tempLine);
+          }
+      });
+
+      return finalLines;
+  });
 }

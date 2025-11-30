@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { throttle } from '@/lib/utils';
 import { CanvasElement, Camera, Point, UserCursor, ToolType, BoundingBox } from '@/types/canvas';
-import { screenToCanvas, canvasToScreen, getElementBounds, isHit, getResizeHandle, getCursorForHandle, rotatePoint } from '@/lib/canvas-math';
+import { screenToCanvas, canvasToScreen, getElementBounds, isHit, getResizeHandle, getCursorForHandle, rotatePoint, getWrappedText } from '@/lib/canvas-math';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import TopToolbar from './TopToolbar';
 import SideToolbar from './SideToolbar';
@@ -20,6 +20,19 @@ type TransformAction =
   | { type: 'resizing'; handle: string; startPoint: Point; startBounds: BoundingBox; startElement: CanvasElement }
   | { type: 'rotating'; startAngle: number; startRotation: number; centerX: number; centerY: number };
 
+type WritingNodeState = {
+    id: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    text: string;
+    color: string;
+    rotation: number;
+};
+
+const FONT_FAMILY = "Inter, sans-serif";
+
 export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
@@ -32,7 +45,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   const [otherCursors, setOtherCursors] = useState<Record<string, UserCursor>>({});
   const [selectedElement, setSelectedElement] = useState<CanvasElement | null>(null);
   const [transformAction, setTransformAction] = useState<TransformAction>({ type: 'none' });
-  const [writingNode, setWritingNode] = useState<{ id: string; x: number; y: number; text: string; color: string } | null>(null);
+  const [writingNode, setWritingNode] = useState<WritingNodeState | null>(null);
   const [cursorStyle, setCursorStyle] = useState('default');
 
   // Refs
@@ -41,6 +54,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   const currentElementRef = useRef<CanvasElement | null>(null);
   const elementsRef = useRef<CanvasElement[]>([]); 
   const channelRef = useRef<RealtimeChannel | null>(null); 
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   
   const supabase = createClient();
 
@@ -99,12 +113,30 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     };
   }, [roomId, userId, supabase]);
 
+
   const broadcastCursor = useRef(throttle((point: Point) => {
     if (channelRef.current) channelRef.current.track({ x: point.x, y: point.y, userId, color });
   }, 30)).current;
 
+  // --- EVENT HANDLERS ---
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    const canvasPoint = screenToCanvas({ x: e.clientX, y: e.clientY }, camera);
+    const hitEl = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
 
-  // --- POINTER EVENTS ---
+    if (hitEl && hitEl.type === 'text') {
+        setWritingNode({
+            id: hitEl.id!,
+            x: hitEl.x,
+            y: hitEl.y,
+            width: hitEl.width || 100,
+            height: hitEl.height || 24,
+            text: hitEl.text || '',
+            color: hitEl.color,
+            rotation: hitEl.rotation || 0
+        });
+        setSelectedElement(null); 
+    }
+  };
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (writingNode) { saveTextNode(); return; }
@@ -114,21 +146,16 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     dragStartRef.current = { x: e.clientX, y: e.clientY };
     const canvasPoint = screenToCanvas({ x: e.clientX, y: e.clientY }, camera);
 
-    // B. SELECTION TOOL LOGIC
     if (activeTool === 'selection') {
-        // 1. Check Handles (Rotate / Resize)
         if (selectedElement) {
             const bounds = getElementBounds(selectedElement);
             if (bounds) {
                 const handle = getResizeHandle(canvasPoint, bounds, camera.z, selectedElement.rotation || 0);
-                
                 if (handle === 'rot') {
                     const cx = bounds.minX + bounds.width / 2;
                     const cy = bounds.minY + bounds.height / 2;
                     const angle = Math.atan2(canvasPoint.y - cy, canvasPoint.x - cx);
-                    setTransformAction({ 
-                        type: 'rotating', startAngle: angle, startRotation: selectedElement.rotation || 0, centerX: cx, centerY: cy 
-                    });
+                    setTransformAction({ type: 'rotating', startAngle: angle, startRotation: selectedElement.rotation || 0, centerX: cx, centerY: cy });
                     return;
                 }
                 else if (handle) {
@@ -140,8 +167,6 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
                 }
             }
         }
-
-        // 2. Check Body Hit
         const hitEl = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
         if (hitEl) {
             setSelectedElement(hitEl);
@@ -156,7 +181,6 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     }
 
     if (activeTool === 'hand') return;
-
     if (activeTool === 'eraser') {
       const hitElement = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
       if (hitElement && hitElement.id) {
@@ -166,19 +190,22 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
       return;
     }
 
-    if (activeTool === 'text') {
-        const id = crypto.randomUUID();
-        setWritingNode({ id, x: canvasPoint.x, y: canvasPoint.y, text: '', color: color });
-        isDraggingRef.current = false; 
-        return;
-    }
-
     setSelectedElement(null);
     const newId = crypto.randomUUID();
+    
     const newEl: CanvasElement = {
-      id: newId, room_id: roomId, user_id: userId, type: activeTool,
-      x: canvasPoint.x, y: canvasPoint.y, width: 0, height: 0,
-      color, stroke_width: strokeWidth, points: activeTool === 'pencil' ? [canvasPoint] : undefined, rotation: 0
+      id: newId, 
+      room_id: roomId, 
+      user_id: userId, 
+      type: activeTool,
+      x: canvasPoint.x, 
+      y: canvasPoint.y, 
+      width: activeTool === 'text' ? 10 : 0, 
+      height: activeTool === 'text' ? 24 : 0, 
+      color, 
+      stroke_width: strokeWidth, 
+      points: activeTool === 'pencil' ? [canvasPoint] : undefined, 
+      rotation: 0
     };
     currentElementRef.current = newEl;
   };
@@ -188,7 +215,6 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     const canvasPoint = screenToCanvas(screenPoint, camera);
     broadcastCursor(canvasPoint);
 
-    // --- CURSOR UPDATES ---
     if (!isDraggingRef.current && activeTool === 'selection') {
         let cursor = 'default';
         if (selectedElement) {
@@ -211,7 +237,6 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
 
     if (!isDraggingRef.current) return;
 
-    // 1. PANNING
     if (activeTool === 'hand' || (e.buttons === 4) || e.shiftKey) { 
       const dx = screenPoint.x - dragStartRef.current.x;
       const dy = screenPoint.y - dragStartRef.current.y;
@@ -220,14 +245,12 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
       return;
     }
 
-    // 2. TRANSFORMING
     if (activeTool === 'selection' && selectedElement) {
         if (transformAction.type === 'rotating') {
             const { centerX, centerY, startAngle, startRotation } = transformAction;
             const currentAngle = Math.atan2(canvasPoint.y - centerY, canvasPoint.x - centerX);
             const deltaDegrees = (currentAngle - startAngle) * (180 / Math.PI);
             const newRotation = startRotation + deltaDegrees;
-            
             const updatedEl = { ...selectedElement, rotation: newRotation };
             setSelectedElement(updatedEl);
             setElements(prev => prev.map(el => el.id === updatedEl.id ? updatedEl : el));
@@ -235,7 +258,6 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
         else if (transformAction.type === 'moving') {
             const newX = canvasPoint.x - transformAction.offsetX;
             const newY = canvasPoint.y - transformAction.offsetY;
-
             if (selectedElement.type === 'pencil' && selectedElement.points) {
                 const bounds = getElementBounds(selectedElement);
                 if (!bounds) return;
@@ -252,130 +274,65 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
             }
         } 
         else if (transformAction.type === 'resizing') {
-            const { startBounds, startPoint, handle, startElement } = transformAction;
-            const rotation = (startElement.rotation || 0);
-
-            // 1. Find Anchor Point in Local Space (opposite to handle) (e.g., if dragging 'br', anchor is 'tl')
-            let anchorX = startBounds.minX;
-            let anchorY = startBounds.minY;
-            if (handle.includes('l')) anchorX = startBounds.maxX;
-            if (handle.includes('t')) anchorY = startBounds.maxY;
-            // for middles, we lock the opposite axis center? no, we just anchor the opposite side.
-            // actually simpler: Use 0,0 reference if we calculate width/height change correctly.
-            
-            // lets stick to the unrotate mouse method but recalculate position based on center shift
-            const oldCx = startBounds.minX + startBounds.width / 2;
-            const oldCy = startBounds.minY + startBounds.height / 2;
-            
-            // rotate mouse points to align with axis 0
-            const unrotatedMouse = rotatePoint(canvasPoint, { x: oldCx, y: oldCy }, -rotation);
-            const unrotatedStart = rotatePoint(startPoint, { x: oldCx, y: oldCy }, -rotation);
-            
-            const dx = unrotatedMouse.x - unrotatedStart.x;
-            const dy = unrotatedMouse.y - unrotatedStart.y;
-
-            let newX = startBounds.minX;
-            let newY = startBounds.minY;
-            let newW = startBounds.width;
-            let newH = startBounds.height;
-
-            // update dimensions in local space
-            if (handle.includes('r')) newW = startBounds.width + dx;
-            if (handle.includes('l')) { newX = startBounds.minX + dx; newW = startBounds.width - dx; }
-            if (handle.includes('b')) newH = startBounds.height + dy;
-            if (handle.includes('t')) { newY = startBounds.minY + dy; newH = startBounds.height - dy; }
-
-            // handle flip (neg width/height)
-            if (newW < 0) { newX += newW; newW = Math.abs(newW); }
-            if (newH < 0) { newY += newH; newH = Math.abs(newH); }
-
-            // 2. Compensate for Rotation Drift
-            // we calculated newX/Y assuming the rotation center stayed the same relative to the mouse,
-            // but since we changed the width/height non-symmetrically, the center moved.
-            // We need to ensure the anchor point stayed fixed in world space
-            
-            // define anchor in local space (0 rotation) based on handle.
-            // e.g., if dragging right, left is anchor. if dragging top, bot is anchor
-            let ax = startBounds.minX;
-            let ay = startBounds.minY;
-            if (handle.includes('l')) ax = startBounds.maxX;
-            if (handle.includes('t')) ay = startBounds.maxY;
-            if (handle === 'tm') { ax = startBounds.minX + startBounds.width/2; ay = startBounds.maxY; }
-            if (handle === 'bm') { ax = startBounds.minX + startBounds.width/2; ay = startBounds.minY; }
-            if (handle === 'lm') { ax = startBounds.maxX; ay = startBounds.minY + startBounds.height/2; }
-            if (handle === 'rm') { ax = startBounds.minX; ay = startBounds.minY + startBounds.height/2; }
-
-            // where was the anchor in world space, originally?
-            const originalAnchorWorld = rotatePoint({x: ax, y: ay}, {x: oldCx, y: oldCy}, rotation);
-
-            // where is the anchor in the NEW local box?
-            // we map the anchor logic to the NEW dimensions
-            let newAx = newX;
-            let newAy = newY;
-            if (handle.includes('l')) newAx = newX + newW;
-            if (handle.includes('t')) newAy = newY + newH;
-            if (handle === 'tm') { newAx = newX + newW/2; newAy = newY + newH; }
-            if (handle === 'bm') { newAx = newX + newW/2; newAy = newY; }
-            if (handle === 'lm') { newAx = newX + newW; newAy = newY + newH/2; }
-            if (handle === 'rm') { newAx = newX; newAy = newY + newH/2; }
-
-            // where is the NEW Center?
-            const newCx = newX + newW / 2;
-            const newCy = newY + newH / 2;
-
-            // where is the NEW Anchor currently in world space (before correction)?
-            const currentNewAnchorWorld = rotatePoint({x: newAx, y: newAy}, {x: newCx, y: newCy}, rotation);
-
-            const driftX = currentNewAnchorWorld.x - originalAnchorWorld.x;
-            const driftY = currentNewAnchorWorld.y - originalAnchorWorld.y;
-
-            // apply drift correction to position
-            const finalX = newX - driftX; // move box back so anchor aligns
-            // we shift newX/newY so that rotating (newAx, newAy) matches originalAnchorWorld.
-            
-            // Correct approach:
-            // The rotated anchor point must equal originalAnchorWorld.
-            // Rot(newAx - newCx) + newCenterWorld = originalAnchorWorld
-            // newCenterWorld = originalAnchorWorld - Rot(newAx - newCx)
-            
-            const unrotatedDistToAnchorX = newAx - newCx;
-            const unrotatedDistToAnchorY = newAy - newCy;
-            
-            // rotate vector from center to anchor
-            const rotatedDistToAnchor = rotatePoint(
-                {x: unrotatedDistToAnchorX, y: unrotatedDistToAnchorY}, 
-                {x: 0, y: 0}, 
-                rotation
-            );
-            
-            const correctCenterWorldX = originalAnchorWorld.x - rotatedDistToAnchor.x;
-            const correctCenterWorldY = originalAnchorWorld.y - rotatedDistToAnchor.y;
-            
-            // now derive Top-Left from center
-            const correctedX = correctCenterWorldX - newW / 2;
-            const correctedY = correctCenterWorldY - newH / 2;
-
-            // apply Updates
-            if (selectedElement.type === 'pencil' && startElement.points) {
-                const scaleX = newW / (startBounds.width || 1);
-                const scaleY = newH / (startBounds.height || 1);
-                const newPoints = startElement.points.map(p => ({
-                    x: correctedX + (p.x - startBounds.minX) * scaleX,
-                    y: correctedY + (p.y - startBounds.minY) * scaleY
-                }));
-                const updatedEl = { ...selectedElement, points: newPoints };
-                setSelectedElement(updatedEl);
-                setElements(prev => prev.map(el => el.id === updatedEl.id ? updatedEl : el));
-            } else {
-                const updatedEl = { ...selectedElement, x: correctedX, y: correctedY, width: newW, height: newH };
-                setSelectedElement(updatedEl);
-                setElements(prev => prev.map(el => el.id === updatedEl.id ? updatedEl : el));
-            }
+             const { startBounds, startPoint, handle, startElement } = transformAction;
+             const rotation = (startElement.rotation || 0);
+             const oldCx = startBounds.minX + startBounds.width / 2;
+             const oldCy = startBounds.minY + startBounds.height / 2;
+             const unrotatedMouse = rotatePoint(canvasPoint, { x: oldCx, y: oldCy }, -rotation);
+             const unrotatedStart = rotatePoint(startPoint, { x: oldCx, y: oldCy }, -rotation);
+             const dx = unrotatedMouse.x - unrotatedStart.x;
+             const dy = unrotatedMouse.y - unrotatedStart.y;
+             let newX = startBounds.minX; let newY = startBounds.minY;
+             let newW = startBounds.width; let newH = startBounds.height;
+             if (handle.includes('r')) newW = startBounds.width + dx;
+             if (handle.includes('l')) { newX = startBounds.minX + dx; newW = startBounds.width - dx; }
+             if (handle.includes('b')) newH = startBounds.height + dy;
+             if (handle.includes('t')) { newY = startBounds.minY + dy; newH = startBounds.height - dy; }
+             if (newW < 0) { newX += newW; newW = Math.abs(newW); }
+             if (newH < 0) { newY += newH; newH = Math.abs(newH); }
+             let ax = startBounds.minX; let ay = startBounds.minY;
+             if (handle.includes('l')) ax = startBounds.maxX;
+             if (handle.includes('t')) ay = startBounds.maxY;
+             if (handle === 'tm') { ax = startBounds.minX + startBounds.width/2; ay = startBounds.maxY; }
+             if (handle === 'bm') { ax = startBounds.minX + startBounds.width/2; ay = startBounds.minY; }
+             if (handle === 'lm') { ax = startBounds.maxX; ay = startBounds.minY + startBounds.height/2; }
+             if (handle === 'rm') { ax = startBounds.minX; ay = startBounds.minY + startBounds.height/2; }
+             const originalAnchorWorld = rotatePoint({x: ax, y: ay}, {x: oldCx, y: oldCy}, rotation);
+             let newAx = newX; let newAy = newY;
+             if (handle.includes('l')) newAx = newX + newW;
+             if (handle.includes('t')) newAy = newY + newH;
+             if (handle === 'tm') { newAx = newX + newW/2; newAy = newY + newH; }
+             if (handle === 'bm') { newAx = newX + newW/2; newAy = newY; }
+             if (handle === 'lm') { newAx = newX + newW; newAy = newY + newH/2; }
+             if (handle === 'rm') { newAx = newX; newAy = newY + newH/2; }
+             const newCx = newX + newW / 2;
+             const newCy = newY + newH / 2;
+             const unrotatedDistToAnchorX = newAx - newCx;
+             const unrotatedDistToAnchorY = newAy - newCy;
+             const rotatedDistToAnchor = rotatePoint({x: unrotatedDistToAnchorX, y: unrotatedDistToAnchorY}, {x: 0, y: 0}, rotation);
+             const correctCenterWorldX = originalAnchorWorld.x - rotatedDistToAnchor.x;
+             const correctCenterWorldY = originalAnchorWorld.y - rotatedDistToAnchor.y;
+             const correctedX = correctCenterWorldX - newW / 2;
+             const correctedY = correctCenterWorldY - newH / 2;
+             if (selectedElement.type === 'pencil' && startElement.points) {
+                 const scaleX = newW / (startBounds.width || 1);
+                 const scaleY = newH / (startBounds.height || 1);
+                 const newPoints = startElement.points.map(p => ({
+                     x: correctedX + (p.x - startBounds.minX) * scaleX,
+                     y: correctedY + (p.y - startBounds.minY) * scaleY
+                 }));
+                 const updatedEl = { ...selectedElement, points: newPoints };
+                 setSelectedElement(updatedEl);
+                 setElements(prev => prev.map(el => el.id === updatedEl.id ? updatedEl : el));
+             } else {
+                 const updatedEl = { ...selectedElement, x: correctedX, y: correctedY, width: newW, height: newH };
+                 setSelectedElement(updatedEl);
+                 setElements(prev => prev.map(el => el.id === updatedEl.id ? updatedEl : el));
+             }
         }
         return;
     }
 
-    // 3. ERASER
     if (activeTool === 'eraser') {
         const hitElement = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
         if (hitElement && hitElement.id) {
@@ -385,12 +342,13 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
         return;
     }
 
-    // 4. DRAWING
     const current = currentElementRef.current;
     if (!current) return;
 
     if (activeTool === 'pencil') {
       current.points?.push(canvasPoint);
+    } else if (activeTool === 'text') {
+        current.width = canvasPoint.x - current.x;
     } else {
       current.width = canvasPoint.x - current.x;
       current.height = canvasPoint.y - current.y;
@@ -412,20 +370,40 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     const current = currentElementRef.current;
     if (!current) return;
 
-    // normalize negative dimensions
     if (activeTool !== 'pencil') {
         if ((current.width || 0) < 0) {
             current.x += current.width || 0;
             current.width = Math.abs(current.width || 0);
         }
-        if ((current.height || 0) < 0) {
-            current.y += current.height || 0;
-            current.height = Math.abs(current.height || 0);
+        if (activeTool === 'text') {
+             if ((current.width || 0) < 20) current.width = 100;
+             current.height = 24; 
+        } else {
+            if ((current.height || 0) < 0) {
+                current.y += current.height || 0;
+                current.height = Math.abs(current.height || 0);
+            }
         }
-        if ((current.width || 0) < 5 && (current.height || 0) < 5) {
+        
+        if (activeTool !== 'text' && (current.width || 0) < 5 && (current.height || 0) < 5) {
             currentElementRef.current = null;
             return;
         }
+    }
+
+    if (activeTool === 'text' && current.id) {
+        setWritingNode({
+            id: current.id,
+            x: current.x,
+            y: current.y,
+            width: current.width || 100,
+            height: current.height || 24,
+            text: '',
+            color: current.color,
+            rotation: current.rotation || 0
+        });
+        currentElementRef.current = null;
+        return; 
     }
 
     setElements(prev => [...prev, current]);
@@ -434,8 +412,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     currentElementRef.current = null;
     
     const { id, ...payload } = current;
-    const dbPayload = { ...payload, points: payload.points || null };
-    const { data } = await supabase.from('strokes').insert(dbPayload).select();
+    const { data } = await supabase.from('strokes').insert({ ...payload, points: payload.points || null }).select();
     if (data && data[0]) {
         const realElement = data[0];
         setElements(prev => prev.map(el => el === current ? realElement : el));
@@ -456,17 +433,40 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   };
 
   const saveTextNode = async () => {
-     if (!writingNode || !writingNode.text.trim()) { setWritingNode(null); return; }
+     if (!writingNode) return;
+     if (!writingNode.text.trim()) { setWritingNode(null); return; }
+
+     const finalHeight = textareaRef.current ? textareaRef.current.scrollHeight : writingNode.height;
+
      const newEl: CanvasElement = {
-         id: writingNode.id, room_id: roomId, user_id: userId, type: 'text',
-         x: writingNode.x, y: writingNode.y, width: writingNode.text.length * 12, height: 24,
-         color: writingNode.color, stroke_width: 1, text: writingNode.text, rotation: 0
+         id: writingNode.id, 
+         room_id: roomId, 
+         user_id: userId, 
+         type: 'text',
+         x: writingNode.x, 
+         y: writingNode.y, 
+         width: writingNode.width, 
+         height: finalHeight / camera.z,
+         color: writingNode.color, 
+         stroke_width: 1, 
+         text: writingNode.text, 
+         rotation: writingNode.rotation
      };
-     setElements(prev => [...prev, newEl]);
+
+     const exists = elements.find(e => e.id === writingNode.id);
+     
+     if (exists) {
+         setElements(prev => prev.map(e => e.id === writingNode.id ? newEl : e));
+         const { id, ...payload } = newEl;
+         await supabase.from('strokes').update({ ...payload, points: null }).eq('id', id);
+     } else {
+         setElements(prev => [...prev, newEl]);
+         const { id, ...payload } = newEl;
+         const { data } = await supabase.from('strokes').insert({ ...payload, points: null }).select();
+         if(data && data[0]) setSelectedElement(data[0]);
+     }
+
      setWritingNode(null);
-     const { id, ...payload } = newEl;
-     await supabase.from('strokes').insert({ ...payload, points: null });
-     setSelectedElement(newEl);
      setActiveTool('selection');
   };
 
@@ -512,7 +512,15 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
                 }
                 break;
             case 'text':
-                if(el.text) { ctx.font = '24px sans-serif'; ctx.fillStyle = el.color; ctx.fillText(el.text, el.x, el.y + 24); }
+                if(el.text && el.width) { 
+                    ctx.font = `24px ${FONT_FAMILY}`; 
+                    ctx.fillStyle = el.color; 
+                    ctx.textBaseline = "top";
+                    const lines = getWrappedText(ctx, el.text, el.width - 4);
+                    lines.forEach((line, i) => {
+                        ctx.fillText(line, el.x, el.y + (i * 28));
+                    });
+                }
                 break;
             case 'rect': ctx.rect(el.x, el.y, el.width || 0, el.height || 0); ctx.stroke(); break;
             case 'ellipse':
@@ -530,10 +538,19 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
       };
 
       elementsRef.current.forEach(drawElement);
-      if (currentElementRef.current) { ctx.globalAlpha = 0.6; drawElement(currentElementRef.current); ctx.globalAlpha = 1.0; }
+      
+      if (currentElementRef.current) { 
+        ctx.globalAlpha = 0.6; 
+        drawElement(currentElementRef.current); 
+        ctx.globalAlpha = 1.0; 
+        if(currentElementRef.current.type === 'text') {
+            ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 1;
+            ctx.strokeRect(currentElementRef.current.x, currentElementRef.current.y, currentElementRef.current.width || 0, currentElementRef.current.height || 0);
+        }
+      }
 
       if (selectedElement) {
-        const bounds = getElementBounds(selectedElement);
+         const bounds = getElementBounds(selectedElement);
         if (bounds) {
             ctx.save();
             if (selectedElement.rotation) {
@@ -562,7 +579,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
 
       Object.values(otherCursors).forEach(c => {
          ctx.fillStyle = c.color; ctx.beginPath(); ctx.arc(c.x, c.y, 5 / camera.z, 0, 2 * Math.PI); 
-         ctx.fill(); ctx.font = `${12 / camera.z}px sans-serif`; ctx.fillText(c.userId.slice(0, 4), c.x + 10/camera.z, c.y);
+         ctx.fill(); ctx.font = `${12 / camera.z}px ${FONT_FAMILY}`; ctx.fillText(c.userId.slice(0, 4), c.x + 10/camera.z, c.y);
       });
 
       ctx.restore(); 
@@ -573,31 +590,57 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     return () => cancelAnimationFrame(id);
   }, [camera, otherCursors, selectedElement]); 
 
+  // Helper to auto-resize textarea height
+  useEffect(() => {
+      if (writingNode && textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+          textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px';
+      }
+  }, [writingNode?.text]);
+
   return (
     <div className="w-full h-screen bg-slate-50 overflow-hidden relative">
       <TopToolbar activeTool={activeTool} setTool={setActiveTool} />
       <SideToolbar tool={activeTool} color={color} setColor={setColor} width={strokeWidth} setWidth={setStrokeWidth} onUndo={() => {}} onSave={() => {}} />
       <div className="fixed bottom-4 left-4 bg-white p-2 rounded shadow text-xs z-50">{Math.round(camera.z * 100)}%</div>
+      
+      {/* TEXT EDITOR OVERLAY */}
       {writingNode && (
           <textarea
+            ref={textareaRef}
             autoFocus
-            className="fixed bg-transparent border border-dashed border-blue-400 outline-none resize-none p-0 m-0 overflow-hidden"
+            className="fixed bg-transparent border border-blue-500 outline-none resize-none overflow-hidden"
             style={{
                 left: canvasToScreen({ x: writingNode.x, y: writingNode.y }, camera).x,
                 top: canvasToScreen({ x: writingNode.x, y: writingNode.y }, camera).y,
-                fontSize: `${24 * camera.z}px`, color: writingNode.color, width: '300px', height: '100px', zIndex: 60
+                width: writingNode.width * camera.z,
+                height: 'auto',
+                minHeight: writingNode.height * camera.z,
+                fontSize: `${24 * camera.z}px`, 
+                lineHeight: `${28 * camera.z}px`,
+                fontFamily: FONT_FAMILY,
+                color: writingNode.color,
+                zIndex: 60,
+                padding: 0,
+                margin: 0,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                transform: `rotate(${writingNode.rotation}deg)`,
+                transformOrigin: 'top left'
             }}
             value={writingNode.text}
             onChange={(e) => setWritingNode({ ...writingNode, text: e.target.value })}
             onBlur={saveTextNode}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveTextNode(); }}}
+            onPointerDown={(e) => e.stopPropagation()} 
           />
       )}
+      
       <canvas 
         ref={canvasRef} 
         onPointerDown={handlePointerDown} 
         onPointerMove={handlePointerMove} 
         onPointerUp={handlePointerUp} 
+        onDoubleClick={handleDoubleClick} 
         onWheel={handleWheel} 
         style={{ cursor: cursorStyle }}
         className="block w-full h-full touch-none"
