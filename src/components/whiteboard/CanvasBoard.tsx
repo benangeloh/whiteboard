@@ -31,6 +31,11 @@ type WritingNodeState = {
     rotation: number;
 };
 
+type HistoryItem = 
+  | { type: 'create'; id: string }
+  | { type: 'delete'; id: string }
+  | { type: 'update'; id: string; prev: Partial<CanvasElement>; next: Partial<CanvasElement> };
+
 const FONT_FAMILY = "Inter, sans-serif";
 
 export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
@@ -47,6 +52,9 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   const [transformAction, setTransformAction] = useState<TransformAction>({ type: 'none' });
   const [writingNode, setWritingNode] = useState<WritingNodeState | null>(null);
   const [cursorStyle, setCursorStyle] = useState('default');
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyStep, setHistoryStep] = useState(-1); 
+  const clipboardRef = useRef<CanvasElement | null>(null);
 
   // Refs
   const isDraggingRef = useRef(false);
@@ -56,9 +64,140 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   const channelRef = useRef<RealtimeChannel | null>(null); 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   
+  const transformStartElementRef = useRef<CanvasElement | null>(null);
+
   const supabase = createClient();
 
   useEffect(() => { elementsRef.current = elements; }, [elements]);
+
+  // --- SHORTCUTS ---
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+        if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
+
+        const isCtrl = e.ctrlKey || e.metaKey;
+
+        if (isCtrl && e.key === 'z' && !e.shiftKey) {
+            e.preventDefault();
+            performUndo();
+        }
+        if ((isCtrl && e.shiftKey && e.key === 'z') || (isCtrl && e.key === 'y')) {
+            e.preventDefault();
+            performRedo();
+        }
+        if (isCtrl && e.key === 'c') {
+            if (selectedElement) {
+                clipboardRef.current = selectedElement;
+            }
+        }
+        if (isCtrl && e.key === 'v') {
+            performPaste();
+        }
+        if (isCtrl && e.key === 'x') {
+            if (selectedElement) {
+                clipboardRef.current = selectedElement;
+                deleteElement(selectedElement);
+            }
+        }
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+            if (selectedElement) {
+                deleteElement(selectedElement);
+            }
+        }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedElement, history, historyStep]); 
+
+  // --- ACTIONS ---
+
+  const addToHistory = (item: HistoryItem) => {
+      const newHistory = history.slice(0, historyStep + 1);
+      newHistory.push(item);
+      setHistory(newHistory);
+      setHistoryStep(newHistory.length - 1);
+  };
+
+  const performUndo = async () => {
+      if (historyStep < 0) return;
+      const item = history[historyStep];
+      
+      if (item.type === 'create') {
+          await supabase.from('strokes').update({ is_deleted: true }).eq('id', item.id);
+          setElements(prev => prev.filter(e => e.id !== item.id));
+          setSelectedElement(null);
+      } else if (item.type === 'delete') {
+          await supabase.from('strokes').update({ is_deleted: false }).eq('id', item.id);
+      } else if (item.type === 'update') {
+          await supabase.from('strokes').update(item.prev).eq('id', item.id);
+          setElements(prev => prev.map(e => e.id === item.id ? { ...e, ...item.prev } : e));
+          if (selectedElement?.id === item.id) setSelectedElement(prev => prev ? { ...prev, ...item.prev } : null);
+      }
+
+      setHistoryStep(prev => prev - 1);
+  };
+
+  const performRedo = async () => {
+      if (historyStep >= history.length - 1) return;
+      const nextStep = historyStep + 1;
+      const item = history[nextStep];
+
+      if (item.type === 'create') {
+          await supabase.from('strokes').update({ is_deleted: false }).eq('id', item.id);
+      } else if (item.type === 'delete') {
+          await supabase.from('strokes').update({ is_deleted: true }).eq('id', item.id);
+          setElements(prev => prev.filter(e => e.id !== item.id));
+          setSelectedElement(null);
+      } else if (item.type === 'update') {
+          await supabase.from('strokes').update(item.next).eq('id', item.id);
+          setElements(prev => prev.map(e => e.id === item.id ? { ...e, ...item.next } : e));
+          if (selectedElement?.id === item.id) setSelectedElement(prev => prev ? { ...prev, ...item.next } : null);
+      }
+
+      setHistoryStep(nextStep);
+  };
+
+  const performPaste = async () => {
+      if (!clipboardRef.current) return;
+      
+      const copy = { ...clipboardRef.current };
+      const newId = crypto.randomUUID();
+      const offset = 20;
+      let newPoints = copy.points;
+      
+      if (copy.type === 'pencil' && copy.points) {
+          newPoints = copy.points.map(p => ({ x: p.x + offset, y: p.y + offset }));
+      }
+
+      const newEl: CanvasElement = {
+          ...copy,
+          id: newId,
+          user_id: userId,
+          x: copy.x + offset,
+          y: copy.y + offset,
+          points: newPoints,
+      };
+
+      const { id, ...rest } = newEl;
+      const payload = { ...rest, points: rest.points || null } as any; 
+      if (payload.created_at) delete payload.created_at; 
+
+      const { data } = await supabase.from('strokes').insert(payload).select();
+      
+      if (data && data[0]) {
+          const inserted = data[0];
+          setElements(prev => [...prev, inserted]);
+          setSelectedElement(inserted);
+          addToHistory({ type: 'create', id: inserted.id });
+      }
+  };
+
+  const deleteElement = async (el: CanvasElement) => {
+      addToHistory({ type: 'delete', id: el.id! });
+      setElements(prev => prev.filter(e => e.id !== el.id));
+      setSelectedElement(null);
+      await supabase.from('strokes').update({ is_deleted: true }).eq('id', el.id);
+  };
 
   // 1. Data Loading & Realtime
   useEffect(() => {
@@ -99,9 +238,14 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
           const updated = payload.new as CanvasElement;
           if (updated.is_deleted) {
               setElements(prev => prev.filter(e => e.id !== updated.id));
+              if (selectedElement?.id === updated.id) setSelectedElement(null);
               return;
           }
-          setElements(prev => prev.map(e => e.id === updated.id ? updated : e));
+          setElements(prev => {
+              const exists = prev.find(e => e.id === updated.id);
+              if (exists) return prev.map(e => e.id === updated.id ? updated : e);
+              return [...prev, updated];
+          });
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') channel.track({ x: 0, y: 0, userId, color });
@@ -119,6 +263,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   }, 30)).current;
 
   // --- EVENT HANDLERS ---
+
   const handleDoubleClick = (e: React.MouseEvent) => {
     const canvasPoint = screenToCanvas({ x: e.clientX, y: e.clientY }, camera);
     const hitEl = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
@@ -151,25 +296,29 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
             const bounds = getElementBounds(selectedElement);
             if (bounds) {
                 const handle = getResizeHandle(canvasPoint, bounds, camera.z, selectedElement.rotation || 0);
-                if (handle === 'rot') {
-                    const cx = bounds.minX + bounds.width / 2;
-                    const cy = bounds.minY + bounds.height / 2;
-                    const angle = Math.atan2(canvasPoint.y - cy, canvasPoint.x - cx);
-                    setTransformAction({ type: 'rotating', startAngle: angle, startRotation: selectedElement.rotation || 0, centerX: cx, centerY: cy });
-                    return;
-                }
-                else if (handle) {
-                    setTransformAction({ 
-                        type: 'resizing', handle, startPoint: canvasPoint, startBounds: { ...bounds },
-                        startElement: JSON.parse(JSON.stringify(selectedElement))
-                    });
+                if (handle) {
+                    transformStartElementRef.current = JSON.parse(JSON.stringify(selectedElement)); 
+                    
+                    if (handle === 'rot') {
+                        const cx = bounds.minX + bounds.width / 2;
+                        const cy = bounds.minY + bounds.height / 2;
+                        const angle = Math.atan2(canvasPoint.y - cy, canvasPoint.x - cx);
+                        setTransformAction({ type: 'rotating', startAngle: angle, startRotation: selectedElement.rotation || 0, centerX: cx, centerY: cy });
+                    } else {
+                        setTransformAction({ 
+                            type: 'resizing', handle, startPoint: canvasPoint, startBounds: { ...bounds },
+                            startElement: JSON.parse(JSON.stringify(selectedElement))
+                        });
+                    }
                     return;
                 }
             }
         }
+        
         const hitEl = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
         if (hitEl) {
             setSelectedElement(hitEl);
+            transformStartElementRef.current = JSON.parse(JSON.stringify(hitEl));
             const startX = hitEl.type === 'pencil' ? getElementBounds(hitEl)!.minX : hitEl.x;
             const startY = hitEl.type === 'pencil' ? getElementBounds(hitEl)!.minY : hitEl.y;
             setTransformAction({ type: 'moving', offsetX: canvasPoint.x - startX, offsetY: canvasPoint.y - startY });
@@ -181,11 +330,11 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     }
 
     if (activeTool === 'hand') return;
+    
     if (activeTool === 'eraser') {
       const hitElement = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
       if (hitElement && hitElement.id) {
-        setElements(prev => prev.filter(e => e.id !== hitElement.id));
-        supabase.from('strokes').update({ is_deleted: true }).eq('id', hitElement.id).then();
+        deleteElement(hitElement);
       }
       return;
     }
@@ -237,12 +386,15 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
 
     if (!isDraggingRef.current) return;
 
-    if (activeTool === 'hand' || (e.buttons === 4) || e.shiftKey) { 
-      const dx = screenPoint.x - dragStartRef.current.x;
-      const dy = screenPoint.y - dragStartRef.current.y;
-      setCamera(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
-      dragStartRef.current = screenPoint;
-      return;
+    if (activeTool === 'hand' || (e.buttons === 4) || (activeTool === 'selection' && !selectedElement && !transformAction.type.includes('mov'))) { 
+      if(activeTool === 'selection' && transformAction.type !== 'none') { /* noop */ }
+      else if (activeTool === 'hand' || e.buttons === 4 || e.shiftKey) {
+          const dx = screenPoint.x - dragStartRef.current.x;
+          const dy = screenPoint.y - dragStartRef.current.y;
+          setCamera(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+          dragStartRef.current = screenPoint;
+          return;
+      }
     }
 
     if (activeTool === 'selection' && selectedElement) {
@@ -288,6 +440,18 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
              if (handle.includes('l')) { newX = startBounds.minX + dx; newW = startBounds.width - dx; }
              if (handle.includes('b')) newH = startBounds.height + dy;
              if (handle.includes('t')) { newY = startBounds.minY + dy; newH = startBounds.height - dy; }
+             
+             if (e.shiftKey) {
+                 const ratio = startBounds.width / startBounds.height;
+                 if (handle.includes('l') || handle.includes('r')) {
+                     newH = newW / ratio; 
+                     if (handle.includes('t')) newY = startBounds.maxY - newH;
+                 } else {
+                     newW = newH * ratio; 
+                     if (handle.includes('l')) newX = startBounds.maxX - newW;
+                 }
+             }
+
              if (newW < 0) { newX += newW; newW = Math.abs(newW); }
              if (newH < 0) { newY += newH; newH = Math.abs(newH); }
              let ax = startBounds.minX; let ay = startBounds.minY;
@@ -334,12 +498,11 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     }
 
     if (activeTool === 'eraser') {
-        const hitElement = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
-        if (hitElement && hitElement.id) {
-            setElements(prev => prev.filter(e => e.id !== hitElement.id));
-            supabase.from('strokes').update({ is_deleted: true }).eq('id', hitElement.id).then();
-        }
-        return;
+       const hitElement = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
+       if (hitElement && hitElement.id) {
+         deleteElement(hitElement);
+       }
+       return;
     }
 
     const current = currentElementRef.current;
@@ -350,8 +513,26 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     } else if (activeTool === 'text') {
         current.width = canvasPoint.x - current.x;
     } else {
-      current.width = canvasPoint.x - current.x;
-      current.height = canvasPoint.y - current.y;
+      let w = canvasPoint.x - current.x;
+      let h = canvasPoint.y - current.y;
+
+      if (e.shiftKey) {
+          if (['rect', 'diamond', 'ellipse'].includes(activeTool)) {
+              const dim = Math.max(Math.abs(w), Math.abs(h));
+              w = w < 0 ? -dim : dim;
+              h = h < 0 ? -dim : dim;
+          } else if (['line', 'arrow'].includes(activeTool)) {
+              const angle = Math.atan2(h, w) * (180 / Math.PI);
+              const snap = Math.round(angle / 45) * 45;
+              const dist = Math.hypot(w, h);
+              const rad = snap * (Math.PI / 180);
+              w = Math.cos(rad) * dist;
+              h = Math.sin(rad) * dist;
+          }
+      }
+
+      current.width = w;
+      current.height = h;
     }
   };
 
@@ -363,7 +544,17 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
         const { id, ...payload } = selectedElement;
         const dbPayload = { ...payload, points: payload.points || null };
         await supabase.from('strokes').update(dbPayload).eq('id', selectedElement.id);
+        
+        if (transformStartElementRef.current) {
+            addToHistory({
+                type: 'update',
+                id: selectedElement.id!,
+                prev: transformStartElementRef.current,
+                next: selectedElement
+            });
+        }
         setTransformAction({ type: 'none' });
+        transformStartElementRef.current = null;
         return;
     }
 
@@ -411,8 +602,12 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     setActiveTool('selection'); 
     currentElementRef.current = null;
     
-    const { id, ...payload } = current;
-    const { data } = await supabase.from('strokes').insert({ ...payload, points: payload.points || null }).select();
+    addToHistory({ type: 'create', id: current.id! });
+
+    const { id, ...rest } = current;
+    const payload = { ...rest, id: current.id, points: rest.points || null }; 
+
+    const { data } = await supabase.from('strokes').insert(payload).select();
     if (data && data[0]) {
         const realElement = data[0];
         setElements(prev => prev.map(el => el === current ? realElement : el));
@@ -461,8 +656,12 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
          await supabase.from('strokes').update({ ...payload, points: null }).eq('id', id);
      } else {
          setElements(prev => [...prev, newEl]);
-         const { id, ...payload } = newEl;
-         const { data } = await supabase.from('strokes').insert({ ...payload, points: null }).select();
+         addToHistory({ type: 'create', id: newEl.id! }); 
+         
+         const { id, ...rest } = newEl;
+         const payload = { ...rest, id: newEl.id, points: null };
+         
+         const { data } = await supabase.from('strokes').insert(payload).select();
          if(data && data[0]) setSelectedElement(data[0]);
      }
 
@@ -470,7 +669,6 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
      setActiveTool('selection');
   };
 
-  // --- RENDER LOOP ---
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
@@ -590,7 +788,6 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     return () => cancelAnimationFrame(id);
   }, [camera, otherCursors, selectedElement]); 
 
-  // Helper to auto-resize textarea height
   useEffect(() => {
       if (writingNode && textareaRef.current) {
           textareaRef.current.style.height = 'auto';
@@ -601,10 +798,17 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   return (
     <div className="w-full h-screen bg-slate-50 overflow-hidden relative">
       <TopToolbar activeTool={activeTool} setTool={setActiveTool} />
-      <SideToolbar tool={activeTool} color={color} setColor={setColor} width={strokeWidth} setWidth={setStrokeWidth} onUndo={() => {}} onSave={() => {}} />
+      <SideToolbar 
+        tool={activeTool} 
+        color={color} 
+        setColor={setColor} 
+        width={strokeWidth} 
+        setWidth={setStrokeWidth} 
+        onUndo={performUndo} 
+        onSave={() => {}} 
+      />
       <div className="fixed bottom-4 left-4 bg-white p-2 rounded shadow text-xs z-50">{Math.round(camera.z * 100)}%</div>
       
-      {/* TEXT EDITOR OVERLAY */}
       {writingNode && (
           <textarea
             ref={textareaRef}
