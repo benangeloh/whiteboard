@@ -4,6 +4,9 @@ export type ToolType =
 
 export type Point = { x: number; y: number };
 
+export type StrokeStyle = 'solid' | 'dashed' | 'dotted';
+export type TextAlign = 'left' | 'center' | 'right';
+
 export type CanvasElement = {
   id?: string;
   room_id: string;
@@ -14,12 +17,23 @@ export type CanvasElement = {
   width?: number; 
   height?: number;
   points?: Point[] | null;
+  
+  // styles
   color: string;
   fill_color?: string;
   stroke_width: number;
+  stroke_style?: StrokeStyle;
+  opacity?: number;
   rotation?: number;
-  is_deleted?: boolean;
+  
+  // text
   text?: string;
+  font_family?: string;
+  font_size?: number;
+  text_align?: TextAlign;
+
+  layer?: number;
+  is_deleted?: boolean;
 };
 
 export type UserCursor = { x: number; y: number; userId: string; color: string; };
