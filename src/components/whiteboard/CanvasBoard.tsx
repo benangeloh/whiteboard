@@ -18,8 +18,7 @@ interface UserProfile {
 }
 
 interface CanvasBoardProps {
-  roomId: string;
-  canvasId?: string | null;
+  canvasId: string;
   userId: string;
   userProfile?: UserProfile;
   permission?: PermissionLevel;
@@ -55,15 +54,13 @@ type HistoryItem =
 const FONT_FAMILY = "Inter, sans-serif";
 
 export default function CanvasBoard({
-  roomId,
-  canvasId: _canvasId,
+  canvasId,
   userId,
   userProfile,
   permission = 'editor',
   canEdit = true,
   canvasTitle = 'Canvas'
 }: CanvasBoardProps) {
-  const canvasId = _canvasId ?? null;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
   // State
@@ -121,7 +118,7 @@ export default function CanvasBoard({
   }), []);
 
   const captureThumbnail = useCallback(async () => {
-    if (!canvasRef.current || !canvasId) return;
+    if (!canvasRef.current) return;
     try {
       const dataUrl = canvasRef.current.toDataURL('image/png');
       const response = await fetch(dataUrl);
@@ -141,7 +138,6 @@ export default function CanvasBoard({
   }, [canvasId, supabase]);
 
   const scheduleThumbnailCapture = useCallback(() => {
-    if (!canvasId) return;
     if (thumbnailTimeoutRef.current) clearTimeout(thumbnailTimeoutRef.current);
     thumbnailTimeoutRef.current = setTimeout(() => {
       thumbnailTimeoutRef.current = null;
@@ -249,7 +245,15 @@ export default function CanvasBoard({
       let newPoints = copy.points;
       if (copy.type === 'pencil' && copy.points) { newPoints = copy.points.map(p => ({ x: p.x + offset, y: p.y + offset })); }
 
-      const newEl: CanvasElement = { ...copy, id: newId, user_id: userId, x: copy.x + offset, y: copy.y + offset, points: newPoints };
+      const newEl: CanvasElement = {
+        ...copy,
+        id: newId,
+        canvas_id: canvasId,
+        user_id: userId,
+        x: copy.x + offset,
+        y: copy.y + offset,
+        points: newPoints,
+      };
         const { created_at: _createdAt, updated_at: _updatedAt, ...rest } = newEl as CanvasElement & {
         created_at?: string;
         updated_at?: string;
@@ -258,7 +262,11 @@ export default function CanvasBoard({
         void _updatedAt;
       const payload = normalizePoints(rest);
 
-      const { data } = await supabase.from('strokes').insert(payload).select();
+      const { data, error } = await supabase.from('strokes').insert(payload).select();
+      if (error) {
+        console.error('Failed to paste stroke', error);
+        return;
+      }
       if (data && data[0]) {
         const inserted = data[0];
         setElements(prev => [...prev, inserted]);
@@ -298,7 +306,7 @@ export default function CanvasBoard({
       const { data } = await supabase
         .from('strokes')
         .select('*')
-        .eq('room_id', roomId)
+        .eq('canvas_id', canvasId)
         .eq('is_deleted', false)
         .order('layer', { ascending: true }) // orderby layer
         .order('created_at', { ascending: true });
@@ -306,7 +314,7 @@ export default function CanvasBoard({
     };
     fetchElements();
 
-    const channel = supabase.channel(`room:${roomId}`, { config: { presence: { key: userId } } });
+    const channel = supabase.channel(`canvas:${canvasId}`, { config: { presence: { key: userId } } });
     channelRef.current = channel;
 
     channel
@@ -324,11 +332,11 @@ export default function CanvasBoard({
         });
         setOtherCursors(cursors);
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'strokes', filter: `room_id=eq.${roomId}` }, (payload) => {
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'strokes', filter: `canvas_id=eq.${canvasId}` }, (payload) => {
           const newEl = payload.new as CanvasElement;
           if (newEl.user_id !== userId) setElements(prev => [...prev, newEl].sort((a,b) => (a.layer||0) - (b.layer||0)));
       })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'strokes', filter: `room_id=eq.${roomId}` }, (payload) => {
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'strokes', filter: `canvas_id=eq.${canvasId}` }, (payload) => {
           const updated = payload.new as CanvasElement;
           if (updated.is_deleted) {
               setElements(prev => prev.filter(e => e.id !== updated.id));
@@ -356,7 +364,7 @@ export default function CanvasBoard({
         supabase.removeChannel(channel);
         channelRef.current = null;
     };
-  }, [roomId, userId, supabase, userProfile]);
+  }, [canvasId, userId, supabase, userProfile]);
 
   useEffect(() => {
     const throttled = throttle((point: Point) => {
@@ -465,7 +473,7 @@ export default function CanvasBoard({
     
     const newEl: CanvasElement = {
       id: newId, 
-      room_id: roomId, 
+      canvas_id: canvasId,
       user_id: userId, 
       type: activeTool,
       x: canvasPoint.x, 
@@ -688,7 +696,11 @@ export default function CanvasBoard({
     addToHistory({ type: 'create', id: current.id! });
 
     const payload = normalizePoints({ ...current });
-    const { data } = await supabase.from('strokes').insert(payload).select();
+    const { data, error } = await supabase.from('strokes').insert(payload).select();
+    if (error) {
+      console.error('Failed to create stroke', error, payload);
+      return;
+    }
     if (data && data[0]) {
         const realElement = data[0];
         setElements(prev => prev.map(el => el === current ? realElement : el).sort((a,b) => (a.layer||0) - (b.layer||0)));
@@ -717,7 +729,7 @@ export default function CanvasBoard({
 
      const newEl: CanvasElement = {
          id: writingNode.id, 
-         room_id: roomId, 
+         canvas_id: canvasId,
          user_id: userId, 
          type: 'text',
          x: writingNode.x, 
@@ -744,8 +756,10 @@ export default function CanvasBoard({
          setElements(prev => [...prev, newEl]);
          addToHistory({ type: 'create', id: newEl.id! }); 
        const payload = normalizePoints({ ...newEl, points: null });
-       const { data } = await supabase.from('strokes').insert(payload).select();
-         if(data && data[0]) setSelectedElement(data[0]);
+       const { data, error } = await supabase.from('strokes').insert(payload).select();
+       if (error) {
+         console.error('Failed to insert text stroke', error);
+       } else if(data && data[0]) setSelectedElement(data[0]);
      }
 
      setWritingNode(null);

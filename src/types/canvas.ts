@@ -9,8 +9,7 @@ export type TextAlign = 'left' | 'center' | 'right';
 
 export type CanvasElement = {
   id?: string;
-  room_id: string;
-  canvas_id?: string; // New: reference to canvas for permission-based access
+  canvas_id: string; // Reference to canvases table for permissions
   user_id: string;
   type: ToolType;
   x: number;
