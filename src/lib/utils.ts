@@ -5,7 +5,7 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-export function throttle<T extends (...args: Parameters<T>) => void>(fn: T, wait: number) {
+export function throttle<T extends (...args: any[]) => void>(fn: T, wait: number) {
   let lastTime = 0
   let timeout: ReturnType<typeof setTimeout> | null = null
   let lastArgs: Parameters<T> | null = null

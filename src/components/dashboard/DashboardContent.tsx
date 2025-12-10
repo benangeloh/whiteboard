@@ -22,12 +22,12 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Users, Layout, Plus } from 'lucide-react';
 
-type DashboardCanvas = CanvasWithOwner & {
+export type DashboardCanvas = CanvasWithOwner & {
   shares?: { id: string }[];
   permission?: PermissionLevel;
 };
 
-interface DashboardContentProps {
+export interface DashboardContentProps {
   profile: Profile | null;
   myCanvases: DashboardCanvas[];
   sharedCanvases: DashboardCanvas[];

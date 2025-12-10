@@ -1,6 +1,12 @@
 import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
-import DashboardContent from '@/components/dashboard/DashboardContent';
+import DashboardContent, { type DashboardCanvas } from '@/components/dashboard/DashboardContent';
+import type { PermissionLevel } from '@/types/database';
+
+type SharedCanvasRow = {
+  permission: PermissionLevel;
+  canvas: DashboardCanvas | null;
+};
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -40,13 +46,17 @@ export default async function DashboardPage() {
       )
     `)
     .eq('user_id', user.id)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .returns<SharedCanvasRow[]>();
 
   // Transform shared canvases to match expected format
-  const sharedCanvases = sharedWithMe?.map(share => ({
-    ...share.canvas,
-    permission: share.permission,
-  })).filter(Boolean) || [];
+  const sharedCanvases: DashboardCanvas[] = (sharedWithMe ?? []).flatMap((share) => {
+    if (!share.canvas) return [];
+    return [{
+      ...share.canvas,
+      permission: share.permission,
+    }];
+  });
 
   return (
     <DashboardContent
