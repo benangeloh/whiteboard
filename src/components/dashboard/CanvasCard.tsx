@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { MoreVertical, Trash2, Share2, Globe, Lock, Users } from 'lucide-react';
+import { toast } from 'sonner';
 
 type CanvasCardCanvas = Omit<CanvasWithOwner, 'owner'> & {
   owner?: CanvasWithOwner['owner'];
@@ -37,21 +38,39 @@ export default function CanvasCard({ canvas, isOwner, onDeleted, onShare }: Canv
   const [deleting, setDeleting] = useState(false);
   const supabase = createClient();
 
-  const handleDelete = async () => {
-    if (!confirm('Are you sure you want to delete this canvas? This action cannot be undone.')) {
-      return;
-    }
-
+  const deleteCanvas = async () => {
     setDeleting(true);
     try {
       await supabase.from('canvases').delete().eq('id', canvas.id);
+      toast.success('Canvas deleted');
       onDeleted?.(canvas.id);
     } catch (error) {
       console.error('Failed to delete canvas:', error);
+      toast.error('Failed to delete canvas');
     } finally {
       setDeleting(false);
       setShowMenu(false);
     }
+  };
+
+  const confirmDelete = () => {
+    if (deleting) return;
+    const toastId = toast.warning('Delete this canvas?', {
+      description: 'This action cannot be undone.',
+      action: {
+        label: 'Delete',
+        onClick: () => {
+          void deleteCanvas();
+        },
+      },
+      cancel: {
+        label: 'Cancel',
+        onClick: () => {},
+      },
+      duration: Infinity,
+      position: 'top-center',
+    });
+    return toastId;
   };
 
   const formatDate = (dateStr: string) => {
@@ -70,8 +89,8 @@ export default function CanvasCard({ canvas, isOwner, onDeleted, onShare }: Canv
   const collaboratorCount = (canvas.shares?.length || 0);
 
   return (
-    <Link href={`/board/${canvas.id}`} className="block">
-      <Card className="overflow-hidden border-muted shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+    <Link href={`/board/${canvas.id}`} className="block" data-clickable="true">
+      <Card data-clickable="true" className="overflow-hidden border-muted shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
         <CardHeader className="p-0">
           <div className="relative aspect-video bg-linear-to-br from-slate-100 to-white">
             {canvas.thumbnail_url ? (
@@ -103,16 +122,17 @@ export default function CanvasCard({ canvas, isOwner, onDeleted, onShare }: Canv
                         onShare?.(canvas.id);
                         setShowMenu(false);
                       }}
+                      className="cursor-pointer"
                     >
                       <Share2 size={14} className="mr-2" /> Share
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       onClick={(e) => {
                         e.preventDefault();
-                        void handleDelete();
+                        confirmDelete();
                       }}
                       disabled={deleting}
-                      className="text-red-600 focus:text-red-600"
+                      className="cursor-pointer text-red-600 focus:text-red-600"
                     >
                       <Trash2 size={14} className="mr-2" /> {deleting ? 'Deleting...' : 'Delete'}
                     </DropdownMenuItem>

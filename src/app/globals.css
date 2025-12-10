@@ -119,4 +119,18 @@
   body {
     @apply bg-background text-foreground;
   }
+  button:not(:disabled),
+  a,
+  label,
+  [role="button"],
+  [role="menuitem"],
+  [role="option"],
+  [role="switch"],
+  [role="tab"],
+  [data-clickable="true"] {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
 }
