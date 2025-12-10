@@ -63,7 +63,7 @@ export default function CanvasBoard({
   canEdit = true,
   canvasTitle = 'Canvas'
 }: CanvasBoardProps) {
-  void _canvasId;
+  const canvasId = _canvasId ?? null;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
   // State
@@ -113,10 +113,48 @@ export default function CanvasBoard({
   const userProfileRef = useRef(userProfile);
   useEffect(() => { userProfileRef.current = userProfile; }, [userProfile]);
 
+  const thumbnailTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const normalizePoints = useCallback(<T extends { points?: Point[] | null }>(value: T): T & { points: Point[] | null } => ({
     ...value,
     points: value.points ?? null,
   }), []);
+
+  const captureThumbnail = useCallback(async () => {
+    if (!canvasRef.current || !canvasId) return;
+    try {
+      const dataUrl = canvasRef.current.toDataURL('image/png');
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const fileName = `${canvasId}-${Date.now()}.png`;
+      const { error: uploadError } = await supabase.storage
+        .from('thumbnails')
+        .upload(fileName, blob, { upsert: true, cacheControl: '3600', contentType: 'image/png' });
+      if (uploadError) return;
+      const { data: publicUrlData } = supabase.storage.from('thumbnails').getPublicUrl(fileName);
+      const publicUrl = publicUrlData?.publicUrl;
+      if (!publicUrl) return;
+      await supabase.from('canvases').update({ thumbnail_url: publicUrl }).eq('id', canvasId);
+    } catch (thumbnailError) {
+      console.error('Failed to capture thumbnail', thumbnailError);
+    }
+  }, [canvasId, supabase]);
+
+  const scheduleThumbnailCapture = useCallback(() => {
+    if (!canvasId) return;
+    if (thumbnailTimeoutRef.current) clearTimeout(thumbnailTimeoutRef.current);
+    thumbnailTimeoutRef.current = setTimeout(() => {
+      thumbnailTimeoutRef.current = null;
+      void captureThumbnail();
+    }, 1500);
+  }, [captureThumbnail, canvasId]);
+
+  useEffect(() => () => {
+    if (thumbnailTimeoutRef.current) {
+      clearTimeout(thumbnailTimeoutRef.current);
+      thumbnailTimeoutRef.current = null;
+    }
+  }, []);
 
   // --- ATTRIBUTE HANDLER ---
   const updateAttributes = async (attrs: Partial<CanvasElement>) => {
@@ -178,7 +216,8 @@ export default function CanvasBoard({
         });
       }
       setHistoryStep(prev => prev - 1);
-    }, [history, historyStep, supabase]);
+      scheduleThumbnailCapture();
+    }, [history, historyStep, scheduleThumbnailCapture, supabase]);
 
     const performRedo = useCallback(async () => {
       if (historyStep >= history.length - 1) return;
@@ -199,7 +238,8 @@ export default function CanvasBoard({
         });
       }
       setHistoryStep(nextStep);
-    }, [history, historyStep, supabase]);
+      scheduleThumbnailCapture();
+    }, [history, historyStep, scheduleThumbnailCapture, supabase]);
 
     const performPaste = useCallback(async () => {
       if (!clipboardRef.current) return;
@@ -224,15 +264,17 @@ export default function CanvasBoard({
         setElements(prev => [...prev, inserted]);
         setSelectedElement(inserted);
         addToHistory({ type: 'create', id: inserted.id! });
+        scheduleThumbnailCapture();
       }
-    }, [addToHistory, normalizePoints, supabase, userId]);
+    }, [addToHistory, normalizePoints, scheduleThumbnailCapture, supabase, userId]);
 
     const deleteElement = useCallback(async (el: CanvasElement) => {
       addToHistory({ type: 'delete', id: el.id! });
       setElements(prev => prev.filter(e => e.id !== el.id));
       setSelectedElement(null);
       await supabase.from('strokes').update({ is_deleted: true }).eq('id', el.id);
-    }, [addToHistory, supabase]);
+      scheduleThumbnailCapture();
+    }, [addToHistory, scheduleThumbnailCapture, supabase]);
 
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
@@ -607,6 +649,7 @@ export default function CanvasBoard({
         if (transformStartElementRef.current) addToHistory({ type: 'update', id: selectedElement.id!, prev: transformStartElementRef.current, next: selectedElement });
         setTransformAction({ type: 'none' });
         transformStartElementRef.current = null;
+      scheduleThumbnailCapture();
         return;
     }
 
@@ -651,6 +694,7 @@ export default function CanvasBoard({
         setElements(prev => prev.map(el => el === current ? realElement : el).sort((a,b) => (a.layer||0) - (b.layer||0)));
         setSelectedElement(realElement); 
     }
+    scheduleThumbnailCapture();
   };
 
     const handleWheel = (e: React.WheelEvent) => {
@@ -706,6 +750,7 @@ export default function CanvasBoard({
 
      setWritingNode(null);
      setActiveTool('selection');
+      scheduleThumbnailCapture();
   };
 
   // --- RENDER LOOP ---
