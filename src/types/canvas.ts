@@ -10,6 +10,7 @@ export type TextAlign = 'left' | 'center' | 'right';
 export type CanvasElement = {
   id?: string;
   room_id: string;
+  canvas_id?: string; // New: reference to canvas for permission-based access
   user_id: string;
   type: ToolType;
   x: number;
@@ -36,6 +37,14 @@ export type CanvasElement = {
   is_deleted?: boolean;
 };
 
-export type UserCursor = { x: number; y: number; userId: string; color: string; };
+export type UserCursor = {
+  x: number;
+  y: number;
+  userId: string;
+  color: string;
+  displayName?: string;
+  avatarUrl?: string | null;
+};
+
 export type Camera = { x: number; y: number; z: number; };
 export type BoundingBox = { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number };

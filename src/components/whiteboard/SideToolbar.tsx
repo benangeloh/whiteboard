@@ -4,9 +4,9 @@ import {
   Undo, Save, Trash2, 
   BringToFront, SendToBack, 
   AlignLeft, AlignCenter, AlignRight,
-  Type, Minus, MoreHorizontal, SquareDashed
+  Minus, MoreHorizontal, SquareDashed
 } from "lucide-react";
-import { CanvasElement, ToolType } from "@/types/canvas";
+import { CanvasElement, ToolType, StrokeStyle } from "@/types/canvas";
 
 interface SideToolbarProps {
   tool: ToolType;
@@ -22,6 +22,7 @@ interface SideToolbarProps {
 const COLORS = ["#000000", "#ef4444", "#22c55e", "#3b82f6", "#a855f7", "#f59e0b"];
 const FILL_COLORS = ["transparent", "#ffffff", "#ef4444", "#22c55e", "#3b82f6", "#f59e0b"];
 const STROKE_WIDTHS = [2, 4, 8];
+const STROKE_STYLES: StrokeStyle[] = ['solid', 'dashed', 'dotted'];
 const FONT_SIZES = [16, 24, 32, 48, 64];
 const FONT_FAMILIES = ["Inter, sans-serif", "serif", "monospace", "cursive"];
 
@@ -33,7 +34,9 @@ export default function SideToolbar({
   const isHidden = ['hand', 'eraser', 'image'].includes(tool) && !selectedElement;
   const targetType = selectedElement ? selectedElement.type : tool;
 
-  const update = (key: keyof CanvasElement, value: any) => setAttributes({ [key]: value });
+  const update = <K extends keyof CanvasElement>(key: K, value: CanvasElement[K]) => {
+    setAttributes({ [key]: value } as Partial<CanvasElement>);
+  };
 
   if (isHidden) return (
     <div className="fixed left-4 top-1/2 -translate-y-1/2 flex flex-col gap-2 bg-white p-2 rounded-lg shadow-md border border-slate-200 z-50">
@@ -75,7 +78,7 @@ export default function SideToolbar({
         )}
       </div>
 
-      <div className="h-[1px] bg-slate-200" />
+      <div className="h-px bg-slate-200" />
 
       {targetType !== 'text' && (
         <div className="space-y-3">
@@ -93,7 +96,7 @@ export default function SideToolbar({
           <div>
             <label className="text-xs font-bold text-slate-400 uppercase mb-2 block">Style</label>
             <div className="flex gap-2 text-slate-800 bg-slate-100 p-1 rounded-lg">
-               {['solid', 'dashed', 'dotted'].map(s => (
+               {STROKE_STYLES.map(s => (
                  <button key={s} onClick={() => update('stroke_style', s)} className={cn("flex-1 h-8 rounded flex items-center justify-center hover:bg-white text-xs capitalize", attributes.stroke_style === s && "bg-white shadow-sm")}>
                     {s === 'solid' ? <Minus size={16}/> : s === 'dashed' ? <MoreHorizontal size={16}/> : <SquareDashed size={16}/>}
                  </button>
@@ -136,7 +139,7 @@ export default function SideToolbar({
         </div>
       )}
 
-      <div className="h-[1px] bg-slate-200" />
+      <div className="h-px bg-slate-200" />
 
       <div className="space-y-3">
         <div>
@@ -150,9 +153,18 @@ export default function SideToolbar({
         </div>
 
         {selectedElement && (
-          <div className="flex gap-2 text-slate-800">
-             <button onClick={() => onLayerChange('back')} className="flex-1 flex items-center justify-center gap-2 p-2 bg-slate-100 rounded hover:bg-slate-200 text-xs" title="Send to Back"><SendToBack size={14}/></button>
-             <button onClick={() => onLayerChange('front')} className="flex-1 flex items-center justify-center gap-2 p-2 bg-slate-100 rounded hover:bg-slate-200 text-xs" title="Bring to Front"><BringToFront size={14}/></button>
+          <div className="space-y-2 text-slate-800">
+            <div className="flex gap-2">
+              <button onClick={() => onLayerChange('back')} className="flex-1 flex items-center justify-center gap-2 p-2 bg-slate-100 rounded hover:bg-slate-200 text-xs" title="Send to Back"><SendToBack size={14}/></button>
+              <button onClick={() => onLayerChange('front')} className="flex-1 flex items-center justify-center gap-2 p-2 bg-slate-100 rounded hover:bg-slate-200 text-xs" title="Bring to Front"><BringToFront size={14}/></button>
+            </div>
+            <button
+              onClick={onDelete}
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-600 hover:bg-red-100"
+              title="Delete selection"
+            >
+              <Trash2 size={14} /> Delete selection
+            </button>
           </div>
         )}
 

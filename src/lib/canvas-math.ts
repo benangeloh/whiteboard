@@ -147,7 +147,7 @@ export function getWrappedText(ctx: CanvasRenderingContext2D, text: string, maxW
           if (ctx.measureText(line).width <= maxWidth) {
               finalLines.push(line);
           } else {
-              let chars = line.split('');
+              const chars = line.split('');
               let tempLine = chars[0];
               for(let k=1; k<chars.length; k++) {
                   if (ctx.measureText(tempLine + chars[k]).width < maxWidth) {

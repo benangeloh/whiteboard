@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { throttle } from '@/lib/utils';
 import { CanvasElement, Camera, Point, UserCursor, ToolType, BoundingBox } from '@/types/canvas';
@@ -9,9 +9,22 @@ import { RealtimeChannel } from '@supabase/supabase-js';
 import TopToolbar from './TopToolbar';
 import SideToolbar from './SideToolbar';
 
+import { PermissionLevel } from '@/types/database';
+
+interface UserProfile {
+  displayName: string;
+  avatarUrl: string | null;
+  email: string;
+}
+
 interface CanvasBoardProps {
   roomId: string;
+  canvasId?: string | null;
   userId: string;
+  userProfile?: UserProfile;
+  permission?: PermissionLevel;
+  canEdit?: boolean;
+  canvasTitle?: string;
 }
 
 type TransformAction = 
@@ -41,7 +54,16 @@ type HistoryItem =
 
 const FONT_FAMILY = "Inter, sans-serif";
 
-export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
+export default function CanvasBoard({
+  roomId,
+  canvasId: _canvasId,
+  userId,
+  userProfile,
+  permission = 'editor',
+  canEdit = true,
+  canvasTitle = 'Canvas'
+}: CanvasBoardProps) {
+  void _canvasId;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
   // State
@@ -74,12 +96,27 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   const currentElementRef = useRef<CanvasElement | null>(null);
   const elementsRef = useRef<CanvasElement[]>([]); 
   const channelRef = useRef<RealtimeChannel | null>(null); 
+  const broadcastCursorRef = useRef<(point: Point) => void>(() => {});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const transformStartElementRef = useRef<CanvasElement | null>(null);
 
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => { elementsRef.current = elements; }, [elements]);
+
+  const selectedElementRef = useRef<CanvasElement | null>(null);
+  useEffect(() => { selectedElementRef.current = selectedElement; }, [selectedElement]);
+
+  const cursorColorRef = useRef(toolAttributes.color || '#000000');
+  useEffect(() => { cursorColorRef.current = toolAttributes.color || '#000000'; }, [toolAttributes.color]);
+
+  const userProfileRef = useRef(userProfile);
+  useEffect(() => { userProfileRef.current = userProfile; }, [userProfile]);
+
+  const normalizePoints = useCallback(<T extends { points?: Point[] | null }>(value: T): T & { points: Point[] | null } => ({
+    ...value,
+    points: value.points ?? null,
+  }), []);
 
   // --- ATTRIBUTE HANDLER ---
   const updateAttributes = async (attrs: Partial<CanvasElement>) => {
@@ -89,8 +126,8 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
           setSelectedElement(updated);
           
           // debounce in prod, direct update for now
-          const { id, ...payload } = updated;
-          await supabase.from('strokes').update(payload).eq('id', id);
+          const { id: updatedId, ...payload } = updated;
+          await supabase.from('strokes').update(normalizePoints(payload)).eq('id', updatedId);
           
       } else {
           setToolAttributes(prev => ({ ...prev, ...attrs }));
@@ -115,62 +152,56 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   };
 
   // --- KEYBOARD SHORTCUTS ---
-  useEffect(() => {
-    const handleKeyDown = async (e: KeyboardEvent) => {
-        if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
-        const isCtrl = e.ctrlKey || e.metaKey;
-
-        if (isCtrl && e.key === 'z' && !e.shiftKey) { e.preventDefault(); performUndo(); }
-        if ((isCtrl && e.shiftKey && e.key === 'z') || (isCtrl && e.key === 'y')) { e.preventDefault(); performRedo(); }
-        if (isCtrl && e.key === 'c') { if (selectedElement) clipboardRef.current = selectedElement; }
-        if (isCtrl && e.key === 'v') { performPaste(); }
-        if (isCtrl && e.key === 'x') { if (selectedElement) { clipboardRef.current = selectedElement; deleteElement(selectedElement); } }
-        if (e.key === 'Delete' || e.key === 'Backspace') { if (selectedElement) deleteElement(selectedElement); }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedElement, history, historyStep]); 
-
   // --- ACTIONS ---
-  const addToHistory = (item: HistoryItem) => {
-      const newHistory = history.slice(0, historyStep + 1);
-      newHistory.push(item);
-      setHistory(newHistory);
-      setHistoryStep(newHistory.length - 1);
-  };
+    const addToHistory = useCallback((item: HistoryItem) => {
+      const nextHistory = history.slice(0, historyStep + 1);
+      nextHistory.push(item);
+      setHistory(nextHistory);
+      setHistoryStep(nextHistory.length - 1);
+    }, [history, historyStep]);
 
-  const performUndo = async () => {
+    const performUndo = useCallback(async () => {
       if (historyStep < 0) return;
       const item = history[historyStep];
       if (item.type === 'create') {
-          await supabase.from('strokes').update({ is_deleted: true }).eq('id', item.id);
-          setElements(prev => prev.filter(e => e.id !== item.id));
-          setSelectedElement(null);
+        await supabase.from('strokes').update({ is_deleted: true }).eq('id', item.id);
+        setElements(prev => prev.filter(e => e.id !== item.id));
+        setSelectedElement(null);
       } else if (item.type === 'delete') {
-          await supabase.from('strokes').update({ is_deleted: false }).eq('id', item.id);
+        await supabase.from('strokes').update({ is_deleted: false }).eq('id', item.id);
       } else if (item.type === 'update') {
-          await supabase.from('strokes').update(item.prev).eq('id', item.id);
-          setElements(prev => prev.map(e => e.id === item.id ? { ...e, ...item.prev } : e));
-          if (selectedElement?.id === item.id) setSelectedElement(prev => prev ? { ...prev, ...item.prev } : null);
+        await supabase.from('strokes').update(item.prev).eq('id', item.id);
+        setElements(prev => prev.map(e => e.id === item.id ? { ...e, ...item.prev } : e));
+        setSelectedElement(prev => {
+          if (!prev || prev.id !== item.id) return prev;
+          return { ...prev, ...item.prev } as CanvasElement;
+        });
       }
       setHistoryStep(prev => prev - 1);
-  };
+    }, [history, historyStep, supabase]);
 
-  const performRedo = async () => {
+    const performRedo = useCallback(async () => {
       if (historyStep >= history.length - 1) return;
       const nextStep = historyStep + 1;
       const item = history[nextStep];
-      if (item.type === 'create') { await supabase.from('strokes').update({ is_deleted: false }).eq('id', item.id); }
-      else if (item.type === 'delete') { await supabase.from('strokes').update({ is_deleted: true }).eq('id', item.id); setElements(prev => prev.filter(e => e.id !== item.id)); setSelectedElement(null); }
-      else if (item.type === 'update') {
-          await supabase.from('strokes').update(item.next).eq('id', item.id);
-          setElements(prev => prev.map(e => e.id === item.id ? { ...e, ...item.next } : e));
-          if (selectedElement?.id === item.id) setSelectedElement(prev => prev ? { ...prev, ...item.next } : null);
+      if (item.type === 'create') {
+        await supabase.from('strokes').update({ is_deleted: false }).eq('id', item.id);
+      } else if (item.type === 'delete') {
+        await supabase.from('strokes').update({ is_deleted: true }).eq('id', item.id);
+        setElements(prev => prev.filter(e => e.id !== item.id));
+        setSelectedElement(null);
+      } else if (item.type === 'update') {
+        await supabase.from('strokes').update(item.next).eq('id', item.id);
+        setElements(prev => prev.map(e => e.id === item.id ? { ...e, ...item.next } : e));
+        setSelectedElement(prev => {
+          if (!prev || prev.id !== item.id) return prev;
+          return { ...prev, ...item.next } as CanvasElement;
+        });
       }
       setHistoryStep(nextStep);
-  };
+    }, [history, historyStep, supabase]);
 
-  const performPaste = async () => {
+    const performPaste = useCallback(async () => {
       if (!clipboardRef.current) return;
       const copy = { ...clipboardRef.current };
       const newId = crypto.randomUUID();
@@ -179,25 +210,45 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
       if (copy.type === 'pencil' && copy.points) { newPoints = copy.points.map(p => ({ x: p.x + offset, y: p.y + offset })); }
 
       const newEl: CanvasElement = { ...copy, id: newId, user_id: userId, x: copy.x + offset, y: copy.y + offset, points: newPoints };
-      const { id, ...rest } = newEl;
-      const payload = { ...rest, points: rest.points || null } as any; 
-      if (payload.created_at) delete payload.created_at; 
+        const { created_at: _createdAt, updated_at: _updatedAt, ...rest } = newEl as CanvasElement & {
+        created_at?: string;
+        updated_at?: string;
+      };
+        void _createdAt;
+        void _updatedAt;
+      const payload = normalizePoints(rest);
 
       const { data } = await supabase.from('strokes').insert(payload).select();
       if (data && data[0]) {
-          const inserted = data[0];
-          setElements(prev => [...prev, inserted]);
-          setSelectedElement(inserted);
-          addToHistory({ type: 'create', id: inserted.id! });
+        const inserted = data[0];
+        setElements(prev => [...prev, inserted]);
+        setSelectedElement(inserted);
+        addToHistory({ type: 'create', id: inserted.id! });
       }
-  };
+    }, [addToHistory, normalizePoints, supabase, userId]);
 
-  const deleteElement = async (el: CanvasElement) => {
+    const deleteElement = useCallback(async (el: CanvasElement) => {
       addToHistory({ type: 'delete', id: el.id! });
       setElements(prev => prev.filter(e => e.id !== el.id));
       setSelectedElement(null);
       await supabase.from('strokes').update({ is_deleted: true }).eq('id', el.id);
-  };
+    }, [addToHistory, supabase]);
+
+    useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+          if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
+          const isCtrl = e.ctrlKey || e.metaKey;
+
+          if (isCtrl && e.key === 'z' && !e.shiftKey) { e.preventDefault(); void performUndo(); }
+          if ((isCtrl && e.shiftKey && e.key === 'z') || (isCtrl && e.key === 'y')) { e.preventDefault(); void performRedo(); }
+          if (isCtrl && e.key === 'c') { if (selectedElement) clipboardRef.current = selectedElement; }
+          if (isCtrl && e.key === 'v') { void performPaste(); }
+          if (isCtrl && e.key === 'x') { if (selectedElement) { clipboardRef.current = selectedElement; void deleteElement(selectedElement); } }
+          if (e.key === 'Delete' || e.key === 'Backspace') { if (selectedElement) void deleteElement(selectedElement); }
+      };
+      window.addEventListener('keydown', handleKeyDown);
+      return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [deleteElement, performPaste, performRedo, performUndo, selectedElement]);
 
   // 1. Data Loading
   useEffect(() => {
@@ -209,7 +260,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
         .eq('is_deleted', false)
         .order('layer', { ascending: true }) // orderby layer
         .order('created_at', { ascending: true });
-      if (data) setElements(data as any);
+      if (data) setElements(data as CanvasElement[]);
     };
     fetchElements();
 
@@ -239,7 +290,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
           const updated = payload.new as CanvasElement;
           if (updated.is_deleted) {
               setElements(prev => prev.filter(e => e.id !== updated.id));
-              if (selectedElement?.id === updated.id) setSelectedElement(null);
+              setSelectedElement(prev => (prev?.id === updated.id ? null : prev));
               return;
           }
           setElements(prev => {
@@ -249,18 +300,42 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
           });
       })
       .subscribe((status) => {
-        if (status === 'SUBSCRIBED') channel.track({ x: 0, y: 0, userId, color: toolAttributes.color });
+        if (status === 'SUBSCRIBED') channel.track({
+          x: 0,
+          y: 0,
+          userId,
+          color: cursorColorRef.current,
+          displayName: userProfile?.displayName || userId.slice(0, 8),
+          avatarUrl: userProfile?.avatarUrl,
+        });
       });
 
-    return () => { 
+    return () => {
         supabase.removeChannel(channel);
         channelRef.current = null;
     };
-  }, [roomId, userId, supabase]);
+  }, [roomId, userId, supabase, userProfile]);
 
-  const broadcastCursor = useRef(throttle((point: Point) => {
-    if (channelRef.current) channelRef.current.track({ x: point.x, y: point.y, userId, color: toolAttributes.color });
-  }, 30)).current;
+  useEffect(() => {
+    const throttled = throttle((point: Point) => {
+      const profileSnapshot = userProfileRef.current;
+      if (channelRef.current) {
+        channelRef.current.track({
+          x: point.x,
+          y: point.y,
+          userId,
+          color: cursorColorRef.current,
+          displayName: profileSnapshot?.displayName || userId.slice(0, 8),
+          avatarUrl: profileSnapshot?.avatarUrl,
+        });
+      }
+    }, 30);
+
+    broadcastCursorRef.current = throttled;
+    return () => {
+      broadcastCursorRef.current = () => {};
+    };
+  }, [userId]);
 
   // --- EVENT HANDLERS ---
 
@@ -302,14 +377,14 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
              if (bounds) {
                  const handle = getResizeHandle(canvasPoint, bounds, camera.z, selectedElement.rotation || 0);
                  if (handle) {
-                     transformStartElementRef.current = JSON.parse(JSON.stringify(selectedElement)); 
+                     transformStartElementRef.current = JSON.parse(JSON.stringify(selectedElement)) as CanvasElement; 
                      if (handle === 'rot') {
                         const cx = bounds.minX + bounds.width / 2;
                         const cy = bounds.minY + bounds.height / 2;
                         const angle = Math.atan2(canvasPoint.y - cy, canvasPoint.x - cx);
                         setTransformAction({ type: 'rotating', startAngle: angle, startRotation: selectedElement.rotation || 0, centerX: cx, centerY: cy });
                      } else {
-                        setTransformAction({ type: 'resizing', handle, startPoint: canvasPoint, startBounds: { ...bounds }, startElement: JSON.parse(JSON.stringify(selectedElement)) });
+                        setTransformAction({ type: 'resizing', handle, startPoint: canvasPoint, startBounds: { ...bounds }, startElement: JSON.parse(JSON.stringify(selectedElement)) as CanvasElement });
                      }
                      return;
                  }
@@ -319,7 +394,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
         // check body hit
         if (hitEl) {
             setSelectedElement(hitEl);
-            transformStartElementRef.current = JSON.parse(JSON.stringify(hitEl));
+            transformStartElementRef.current = JSON.parse(JSON.stringify(hitEl)) as CanvasElement;
             const startX = hitEl.type === 'pencil' ? getElementBounds(hitEl)!.minX : hitEl.x;
             const startY = hitEl.type === 'pencil' ? getElementBounds(hitEl)!.minY : hitEl.y;
             setTransformAction({ type: 'moving', offsetX: canvasPoint.x - startX, offsetY: canvasPoint.y - startY });
@@ -331,6 +406,10 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     }
 
     if (activeTool === 'hand') return;
+
+    // Read-only mode: only allow selection and hand tools
+    if (!canEdit) return;
+
     if (activeTool === 'eraser') {
       const hitElement = [...elementsRef.current].reverse().find(el => isHit(canvasPoint, el));
       if (hitElement && hitElement.id) deleteElement(hitElement);
@@ -370,7 +449,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
   const handlePointerMove = (e: React.PointerEvent) => {
     const screenPoint = { x: e.clientX, y: e.clientY };
     const canvasPoint = screenToCanvas(screenPoint, camera);
-    broadcastCursor(canvasPoint);
+    broadcastCursorRef.current(canvasPoint);
 
     // cursor Logic
     if (!isDraggingRef.current && activeTool === 'selection') {
@@ -522,9 +601,9 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     e.currentTarget.releasePointerCapture(e.pointerId);
 
     if (activeTool === 'selection' && selectedElement && transformAction.type !== 'none') {
-        const { id, ...payload } = selectedElement;
-        const dbPayload = { ...payload, points: payload.points || null };
-        await supabase.from('strokes').update(dbPayload).eq('id', selectedElement.id);
+        const { id: selectedId, ...payload } = selectedElement;
+        const dbPayload = normalizePoints(payload);
+        await supabase.from('strokes').update(dbPayload).eq('id', selectedId);
         if (transformStartElementRef.current) addToHistory({ type: 'update', id: selectedElement.id!, prev: transformStartElementRef.current, next: selectedElement });
         setTransformAction({ type: 'none' });
         transformStartElementRef.current = null;
@@ -565,8 +644,7 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
     
     addToHistory({ type: 'create', id: current.id! });
 
-    const { id, ...rest } = current;
-    const payload = { ...rest, id: current.id, points: rest.points || null }; 
+    const payload = normalizePoints({ ...current });
     const { data } = await supabase.from('strokes').insert(payload).select();
     if (data && data[0]) {
         const realElement = data[0];
@@ -615,15 +693,14 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
      const exists = elements.find(e => e.id === writingNode.id);
      
      if (exists) {
-         setElements(prev => prev.map(e => e.id === writingNode.id ? newEl : e));
-         const { id, ...payload } = newEl;
-         await supabase.from('strokes').update({ ...payload, points: null }).eq('id', id);
+       setElements(prev => prev.map(e => e.id === writingNode.id ? newEl : e));
+       const { id: textId, ...payload } = newEl;
+       await supabase.from('strokes').update({ ...payload, points: null }).eq('id', textId);
      } else {
          setElements(prev => [...prev, newEl]);
          addToHistory({ type: 'create', id: newEl.id! }); 
-         const { id, ...rest } = newEl;
-         const payload = { ...rest, id: newEl.id, points: null };
-         const { data } = await supabase.from('strokes').insert(payload).select();
+       const payload = normalizePoints({ ...newEl, points: null });
+       const { data } = await supabase.from('strokes').insert(payload).select();
          if(data && data[0]) setSelectedElement(data[0]);
      }
 
@@ -744,8 +821,29 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
       }
 
       Object.values(otherCursors).forEach(c => {
-         ctx.fillStyle = c.color; ctx.beginPath(); ctx.arc(c.x, c.y, 5 / camera.z, 0, 2 * Math.PI); 
-         ctx.fill(); ctx.font = `${12 / camera.z}px ${FONT_FAMILY}`; ctx.fillText(c.userId.slice(0, 4), c.x + 10/camera.z, c.y);
+         // Draw cursor dot
+         ctx.fillStyle = c.color;
+         ctx.beginPath();
+         ctx.arc(c.x, c.y, 5 / camera.z, 0, 2 * Math.PI);
+         ctx.fill();
+
+         // Draw user name label with background
+         const labelText = c.displayName || c.userId.slice(0, 8);
+         ctx.font = `${11 / camera.z}px ${FONT_FAMILY}`;
+         const textWidth = ctx.measureText(labelText).width;
+         const labelX = c.x + 12 / camera.z;
+         const labelY = c.y - 8 / camera.z;
+         const padding = 4 / camera.z;
+
+         // Background
+         ctx.fillStyle = c.color;
+         ctx.beginPath();
+         ctx.roundRect(labelX - padding, labelY - 12 / camera.z, textWidth + padding * 2, 16 / camera.z, 3 / camera.z);
+         ctx.fill();
+
+         // Text
+         ctx.fillStyle = '#ffffff';
+         ctx.fillText(labelText, labelX, labelY);
       });
 
       ctx.restore(); 
@@ -757,7 +855,13 @@ export default function CanvasBoard({ roomId, userId }: CanvasBoardProps) {
 
   return (
     <div className="w-full h-screen bg-slate-50 overflow-hidden relative">
-      <TopToolbar activeTool={activeTool} setTool={setActiveTool} />
+      <TopToolbar
+        activeTool={activeTool}
+        setTool={setActiveTool}
+        canvasTitle={canvasTitle}
+        canEdit={canEdit}
+        permission={permission}
+      />
       
       <SideToolbar 
         tool={activeTool} 

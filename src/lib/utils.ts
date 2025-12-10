@@ -1,18 +1,37 @@
-import { type ClassValue, clsx } from "clsx"
+import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-// Basic throttle function to limit event firing
-export function throttle<T extends (...args: any[]) => any>(func: T, limit: number): T {
-  let inThrottle: boolean;
-  return function(this: any, ...args: any[]) {
-    if (!inThrottle) {
-      func.apply(this, args);
-      inThrottle = true;
-      setTimeout(() => (inThrottle = false), limit);
+export function throttle<T extends (...args: Parameters<T>) => void>(fn: T, wait: number) {
+  let lastTime = 0
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  let lastArgs: Parameters<T> | null = null
+
+  const invoke = () => {
+    if (lastArgs) {
+      fn(...lastArgs)
+      lastArgs = null
+      lastTime = Date.now()
     }
-  } as T;
+    timeout = null
+  }
+
+  return (...args: Parameters<T>) => {
+    const now = Date.now()
+    const remaining = wait - (now - lastTime)
+    lastArgs = args
+
+    if (remaining <= 0 || remaining > wait) {
+      if (timeout) {
+        clearTimeout(timeout)
+        timeout = null
+      }
+      invoke()
+    } else if (!timeout) {
+      timeout = setTimeout(invoke, remaining)
+    }
+  }
 }
